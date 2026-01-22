@@ -286,6 +286,22 @@ def run_pipeline():
     print("Fetching news...")
     articles = fetch_news()
 
+    # ============================================================
+    print("Fetching news for test...")
+    articles = fetch_news()
+    print(f"Number of articles fetched: {len(articles)}")
+    if articles:
+        for a in articles[:5]:  # afficher les 5 premiers
+            print(a["title"], "-", a.get("published_at"))
+    else:
+        print("No news returned by fetch_news()")
+
+    for article in articles[:10]:
+        matched_assets = map_news_to_asset(article, assets)
+        print(article["title"], "->", matched_assets)
+
+    # ============================================================
+
     print("Cleaning news...")
     articles = clean_news(articles)
 
