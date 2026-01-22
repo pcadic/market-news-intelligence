@@ -16,6 +16,7 @@ sentencepiece==0.1.99
 # News ingestion
 requests==2.31.0
 beautifulsoup4==4.12.3
+feedparser==6.0.10   # <-- Ajouté
 
 # Utils
 tqdm==4.66.1
