@@ -215,50 +215,64 @@ def process_nlp_for_unprocessed_news():
 
 
 # ============================================================
-# 6️⃣ DAILY METRICS
+# 6️⃣ DAILY METRICS (Python uniquement)
 # ============================================================
 
+import pandas as pd
+
 def compute_daily_metrics():
-    query = """
-    select
-        n.asset_id,
-        date(n.published_at) as metric_date,
-        avg(nlp.sentiment_score) as avg_sentiment,
-        count(*) as news_volume,
-        stddev(nlp.sentiment_score) as sentiment_std
-    from news n
-    join news_nlp nlp on n.news_id = nlp.news_id
-    group by n.asset_id, date(n.published_at)
-    """
+    # Récupérer toutes les news avec leur sentiment
+    news_rows = supabase.table("news").select(
+        "news_id, asset_id, published_at, news_nlp(sentiment_score)"
+    ).execute().data
 
-    response = supabase.rpc("execute_sql", {"query": query}).execute()
-    df = pd.DataFrame(response.data)
+    # Vérifier qu'on a des données
+    if not news_rows:
+        print("No news with NLP found yet.")
+        return
 
-    for _, row in df.iterrows():
-        signal = compute_signal(
-            row["avg_sentiment"],
-            row["sentiment_std"],
-            row["news_volume"]
-        )
+    # Convertir en DataFrame
+    records = []
+    for n in news_rows:
+        if "news_nlp" in n and n["news_nlp"]:
+            for nlp in n["news_nlp"]:
+                records.append({
+                    "news_id": n["news_id"],
+                    "asset_id": n["asset_id"],
+                    "published_at": n["published_at"],
+                    "sentiment_score": nlp.get("sentiment_score", 0)
+                })
 
+    if not records:
+        print("No NLP sentiment scores found.")
+        return
+
+    df = pd.DataFrame(records)
+    df["metric_date"] = pd.to_datetime(df["published_at"]).dt.date
+
+    # Calcul des métriques journalières
+    daily_metrics = df.groupby(["asset_id", "metric_date"]).agg(
+        avg_sentiment=("sentiment_score", "mean"),
+        news_volume=("sentiment_score", "count"),
+        sentiment_std=("sentiment_score", "std")
+    ).reset_index()
+
+    # Calculer le signal et upsert dans Supabase
+    for _, row in daily_metrics.iterrows():
         supabase.table("daily_metrics").upsert({
             "asset_id": row["asset_id"],
-            "metric_date": row["metric_date"],
+            "metric_date": row["metric_date"].isoformat(),
             "avg_sentiment": row["avg_sentiment"],
             "news_volume": row["news_volume"],
             "sentiment_std": row["sentiment_std"],
-            "signal": signal
+            "signal": compute_signal(
+                row["avg_sentiment"], 
+                row["sentiment_std"], 
+                row["news_volume"]
+            )
         }).execute()
 
-
-def compute_signal(avg_sentiment, sentiment_std, news_volume):
-    if sentiment_std and sentiment_std > HIGH_STD:
-        return "high_uncertainty"
-    if avg_sentiment and avg_sentiment > POS_THRESHOLD:
-        return "positive_momentum"
-    if avg_sentiment and avg_sentiment < NEG_THRESHOLD:
-        return "caution"
-    return "neutral"
+    print("Daily metrics computed and upserted successfully.")
 
 
 # ============================================================
