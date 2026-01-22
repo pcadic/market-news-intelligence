@@ -18,6 +18,7 @@ sentencepiece==0.1.99
 requests==2.31.0
 beautifulsoup4==4.12.3
 feedparser==6.0.10
+yfinance==0.2.36
 
 # Utils
 tqdm==4.66.1
