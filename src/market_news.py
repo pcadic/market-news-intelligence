@@ -59,6 +59,7 @@ def fetch_news_for_asset(ticker):
 
 def fetch_news():
     assets = fetch_assets()
+    print("DEBUG – Assets:", assets)
     all_articles = []
     for asset in tqdm(assets, desc="Fetching news for assets"):
         ticker = asset["ticker"]
