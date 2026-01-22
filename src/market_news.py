@@ -1,176 +1,149 @@
-import pandas as pd
-import yfinance as yf
-from supabase import create_client, Client
-from datetime import datetime
-from tqdm import tqdm
-
-# ============================================================
-# 1️⃣ Supabase client (variables d'environnement)
-# ============================================================
-
 import os
-from dotenv import load_dotenv
+import feedparser
+import requests
+from datetime import datetime, timezone
+from tqdm import tqdm
+from supabase import create_client, Client
+from transformers import pipeline
 
-load_dotenv()  # charge .env
-
-SUPABASE_URL = os.getenv("SUPABASE_URL")
-SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+# =====================
+# ENV & SUPABASE
+# =====================
+SUPABASE_URL = os.environ.get("SUPABASE_URL")
+SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-# ============================================================
-# 2️⃣ Helpers
-# ============================================================
+# =====================
+# NLP MODEL (HF)
+# =====================
+sentiment_model = pipeline(
+    "sentiment-analysis",
+    model="ProsusAI/finbert"
+)
 
-def compute_signal(avg_sentiment, sentiment_std, news_volume):
-    """
-    Simple heuristic signal:
-    - Buy if sentiment > 0.5
-    - Sell if sentiment < -0.5
-    - Hold otherwise
-    """
-    if avg_sentiment > 0.5:
-        return "buy"
-    elif avg_sentiment < -0.5:
-        return "sell"
-    else:
-        return "hold"
+# =====================
+# RSS SOURCES (STABLE)
+# =====================
+REUTERS_RSS = "https://feeds.reuters.com/reuters/businessNews"
+YAHOO_RSS = "https://finance.yahoo.com/rss/topstories"
 
-# ============================================================
-# 3️⃣ Fetch assets from Supabase
-# ============================================================
-
-def fetch_assets():
+# =====================
+# HELPERS
+# =====================
+def get_assets():
     response = supabase.table("assets").select("*").execute()
-    return response.data if response.data else []
+    return response.data or []
 
-# ============================================================
-# 4️⃣ Fetch news from yfinance
-# ============================================================
+def fetch_rss(url):
+    return feedparser.parse(url).entries
 
-def fetch_news_for_asset(ticker):
-    try:
-        yf_ticker = yf.Ticker(ticker)
-        news_items = yf_ticker.news  # list of dicts
-        return news_items
-    except Exception as e:
-        print(f"Error fetching news for {ticker}: {e}")
-        return []
+def asset_match(article_title, asset):
+    keywords = [
+        asset["ticker"].replace(".TO", ""),
+        asset["name"].lower()
+    ]
+    title = article_title.lower()
+    return any(k.lower() in title for k in keywords)
 
-def fetch_news():
-    assets = fetch_assets()
-    print("DEBUG – Assets:", assets)
-    all_articles = []
-    for asset in tqdm(assets, desc="Fetching news for assets"):
-        ticker = asset["ticker"]
-        news_items = fetch_news_for_asset(ticker)
-        for n in news_items:
-            article = {
-                "news_id": n.get("uuid", f"{ticker}_{n.get('providerPublishTime', datetime.now().timestamp())}"),
-                "asset_id": asset["id"],
-                "published_at": datetime.fromtimestamp(n.get("providerPublishTime", datetime.now().timestamp())).isoformat(),
-                "title": n.get("title", ""),
-                "content": n.get("summary", ""),
-                "url": n.get("link", ""),
-                "source": n.get("publisher", ""),
-            }
-            all_articles.append(article)
-    return all_articles
+def analyze_sentiment(text):
+    result = sentiment_model(text[:512])[0]
+    return result["label"], float(result["score"])
 
-# ============================================================
-# 5️⃣ Store raw news in Supabase
-# ============================================================
-
-def store_raw_news(article):
-    supabase.table("news").upsert(article).execute()
-
-# ============================================================
-# 6️⃣ NLP placeholder (à remplacer par ton modèle Hugging Face)
-# ============================================================
-
-def process_nlp_for_unprocessed_news():
-    # Récupérer toutes les news sans NLP
-    news_rows = supabase.table("news").select("*").execute().data
-    for n in news_rows:
-        # Fake sentiment for demo (remplacer par ton modèle HF)
-        sentiment_score = 0.2  # placeholder
-        supabase.table("news").update({
-            "news_nlp": [{"sentiment_score": sentiment_score}]
-        }).eq("news_id", n["news_id"]).execute()
-
-# ============================================================
-# 7️⃣ Compute daily metrics in Python
-# ============================================================
-
-def compute_daily_metrics():
-    news_rows = supabase.table("news").select(
-        "news_id, asset_id, published_at, news_nlp(sentiment_score)"
-    ).execute().data
-
-    if not news_rows:
-        print("No news found for metrics.")
-        return
-
-    records = []
-    for n in news_rows:
-        if "news_nlp" in n and n["news_nlp"]:
-            for nlp in n["news_nlp"]:
-                records.append({
-                    "news_id": n["news_id"],
-                    "asset_id": n["asset_id"],
-                    "published_at": n["published_at"],
-                    "sentiment_score": nlp.get("sentiment_score", 0)
-                })
-
-    if not records:
-        print("No NLP sentiment scores found.")
-        return
-
-    df = pd.DataFrame(records)
-    df["metric_date"] = pd.to_datetime(df["published_at"]).dt.date
-
-    daily_metrics = df.groupby(["asset_id", "metric_date"]).agg(
-        avg_sentiment=("sentiment_score", "mean"),
-        news_volume=("sentiment_score", "count"),
-        sentiment_std=("sentiment_score", "std")
-    ).reset_index()
-
-    for _, row in daily_metrics.iterrows():
-        supabase.table("daily_metrics").upsert({
-            "asset_id": row["asset_id"],
-            "metric_date": row["metric_date"].isoformat(),
-            "avg_sentiment": row["avg_sentiment"],
-            "news_volume": row["news_volume"],
-            "sentiment_std": row["sentiment_std"],
-            "signal": compute_signal(
-                row["avg_sentiment"], 
-                row["sentiment_std"], 
-                row["news_volume"]
-            )
-        }).execute()
-
-    print("Daily metrics computed and upserted successfully.")
-
-# ============================================================
-# 8️⃣ Main pipeline
-# ============================================================
-
+# =====================
+# PIPELINE
+# =====================
 def run_pipeline():
-    print("Fetching news...")
-    articles = fetch_news()
-    print(f"Fetched {len(articles)} articles.")
+    print("Fetching assets...")
+    assets = get_assets()
+    print(f"{len(assets)} assets found")
 
-    for article in articles:
-        store_raw_news(article)
+    print("Fetching RSS feeds...")
+    articles = fetch_rss(REUTERS_RSS) + fetch_rss(YAHOO_RSS)
 
-    print("Running NLP...")
-    process_nlp_for_unprocessed_news()
+    print(f"{len(articles)} raw articles fetched")
 
-    print("Computing daily metrics...")
+    rows_to_insert = []
+
+    for asset in tqdm(assets, desc="Processing assets"):
+        for article in articles:
+            title = article.get("title", "")
+            link = article.get("link", "")
+
+            if not title or not asset_match(title, asset):
+                continue
+
+            sentiment, score = analyze_sentiment(title)
+
+            rows_to_insert.append({
+                "asset_id": asset["asset_id"],
+                "title": title,
+                "url": link,
+                "published_at": datetime.now(timezone.utc).isoformat(),
+                "sentiment": sentiment,
+                "sentiment_score": score,
+                "source": "RSS"
+            })
+
+    print(f"{len(rows_to_insert)} articles to ingest")
+
+    if rows_to_insert:
+        supabase.table("market_news").insert(rows_to_insert).execute()
+        print("News ingested successfully")
+    else:
+        print("No matching news found")
+
     compute_daily_metrics()
 
-    print("Pipeline completed successfully.")
+# =====================
+# METRICS
+# =====================
+def compute_daily_metrics():
+    print("Computing daily metrics...")
 
-# ============================================================
+    today = datetime.now(timezone.utc).date().isoformat()
+
+    news = supabase.table("market_news") \
+        .select("asset_id,sentiment_score") \
+        .gte("published_at", f"{today}T00:00:00") \
+        .execute().data
+
+    if not news:
+        print("No news found for metrics")
+        return
+
+    metrics = {}
+
+    for n in news:
+        aid = n["asset_id"]
+        metrics.setdefault(aid, []).append(n["sentiment_score"])
+
+    rows = []
+    for aid, scores in metrics.items():
+        avg = sum(scores) / len(scores)
+
+        recommendation = (
+            "BUY" if avg > 0.4 else
+            "SELL" if avg < -0.4 else
+            "HOLD"
+        )
+
+        rows.append({
+            "asset_id": aid,
+            "date": today,
+            "avg_sentiment": avg,
+            "recommendation": recommendation
+        })
+
+    supabase.table("daily_metrics").upsert(
+        rows,
+        on_conflict="asset_id,date"
+    ).execute()
+
+    print("Daily metrics updated")
+
+# =====================
+# ENTRY POINT
+# =====================
 if __name__ == "__main__":
     run_pipeline()
