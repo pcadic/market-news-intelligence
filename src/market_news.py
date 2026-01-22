@@ -1,237 +1,115 @@
-import os
-import requests
-import feedparser
-from datetime import datetime
-from typing import List, Dict
-
 import pandas as pd
+import yfinance as yf
 from supabase import create_client, Client
-
-from transformers import pipeline
-
-# ============================================================
-# CONFIG
-# ============================================================
-
-RSS_SOURCES = [
-    {
-        "name": "Yahoo Finance",
-        "url": "https://feeds.finance.yahoo.com/rss/2.0/headline?s=TSX&region=US&lang=en-US"
-    },
-    {
-        "name": "Reuters Business",
-        "url": "https://feeds.reuters.com/reuters/businessNews"
-    }
-]
-
-MIN_ARTICLE_LENGTH = 500
-POS_THRESHOLD = 0.2
-NEG_THRESHOLD = -0.2
-HIGH_STD = 0.6
+from datetime import datetime
+from tqdm import tqdm
 
 # ============================================================
-# SUPABASE CLIENT
+# 1️⃣ Supabase client (variables d'environnement)
 # ============================================================
 
-supabase: Client = create_client(
-    os.environ["SUPABASE_URL"],
-    os.environ["SUPABASE_KEY"]
-)
+import os
+from dotenv import load_dotenv
+
+load_dotenv()  # charge .env
+
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+
+supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 # ============================================================
-# NLP MODELS (HUGGING FACE)
+# 2️⃣ Helpers
 # ============================================================
 
-summarizer = pipeline(
-    "summarization",
-    model="facebook/bart-large-cnn"
-)
-
-sentiment_model = pipeline(
-    "sentiment-analysis",
-    model="ProsusAI/finbert"
-)
+def compute_signal(avg_sentiment, sentiment_std, news_volume):
+    """
+    Simple heuristic signal:
+    - Buy if sentiment > 0.5
+    - Sell if sentiment < -0.5
+    - Hold otherwise
+    """
+    if avg_sentiment > 0.5:
+        return "buy"
+    elif avg_sentiment < -0.5:
+        return "sell"
+    else:
+        return "hold"
 
 # ============================================================
-# UTILITIES
+# 3️⃣ Fetch assets from Supabase
 # ============================================================
 
-def fetch_assets() -> List[Dict]:
+def fetch_assets():
     response = supabase.table("assets").select("*").execute()
-    return response.data
-
-
-def is_duplicate(url: str) -> bool:
-    if not url:
-        return False
-    response = (
-        supabase
-        .table("news")
-        .select("news_id")
-        .eq("url", url)
-        .execute()
-    )
-    return len(response.data) > 0
-
+    return response.data if response.data else []
 
 # ============================================================
-# 1️⃣ FETCH NEWS
+# 4️⃣ Fetch news from yfinance
 # ============================================================
 
-def fetch_news() -> List[Dict]:
-    articles = []
+def fetch_news_for_asset(ticker):
+    try:
+        yf_ticker = yf.Ticker(ticker)
+        news_items = yf_ticker.news  # list of dicts
+        return news_items
+    except Exception as e:
+        print(f"Error fetching news for {ticker}: {e}")
+        return []
 
-    for source in RSS_SOURCES:
-        feed = feedparser.parse(source["url"])
-
-        for entry in feed.entries:
-            content = entry.get("summary", "")
-            published = entry.get("published_parsed")
-
-            if not published:
-                continue
-
-            articles.append({
-                "source": source["name"],
-                "title": entry.title,
-                "content": content,
-                "url": entry.get("link"),
-                "published_at": datetime(*published[:6])
-            })
-
-    return articles
-
-
-# ============================================================
-# 2️⃣ CLEAN & FILTER
-# ============================================================
-
-def clean_news(articles: List[Dict]) -> List[Dict]:
-    cleaned = []
-
-    for a in articles:
-        if len(a["content"]) < MIN_ARTICLE_LENGTH:
-            continue
-        if is_duplicate(a["url"]):
-            continue
-
-        cleaned.append(a)
-
-    return cleaned
-
+def fetch_news():
+    assets = fetch_assets()
+    all_articles = []
+    for asset in tqdm(assets, desc="Fetching news for assets"):
+        ticker = asset["ticker"]
+        news_items = fetch_news_for_asset(ticker)
+        for n in news_items:
+            article = {
+                "news_id": n.get("uuid", f"{ticker}_{n.get('providerPublishTime', datetime.now().timestamp())}"),
+                "asset_id": asset["id"],
+                "published_at": datetime.fromtimestamp(n.get("providerPublishTime", datetime.now().timestamp())).isoformat(),
+                "title": n.get("title", ""),
+                "content": n.get("summary", ""),
+                "url": n.get("link", ""),
+                "source": n.get("publisher", ""),
+            }
+            all_articles.append(article)
+    return all_articles
 
 # ============================================================
-# 3️⃣ MAP NEWS TO ASSETS
+# 5️⃣ Store raw news in Supabase
 # ============================================================
 
-def map_news_to_asset(article: Dict, assets: List[Dict]):
-    title = article["title"].upper()
-    content = article["content"].upper()
-
-    for asset in assets:
-        if asset["ticker"].upper() in title:
-            return asset["asset_id"]
-        if asset["name"].upper() in content:
-            return asset["asset_id"]
-
-    return None
-
+def store_raw_news(article):
+    supabase.table("news").upsert(article).execute()
 
 # ============================================================
-# 4️⃣ STORE RAW NEWS
+# 6️⃣ NLP placeholder (à remplacer par ton modèle Hugging Face)
 # ============================================================
-
-def store_raw_news(article: Dict, asset_id):
-    supabase.table("news").insert({
-        "asset_id": asset_id,
-        "source": article["source"],
-        "title": article["title"],
-        "content": article["content"],
-        "url": article["url"],
-        "published_at": article["published_at"].isoformat()
-    }).execute()
-
-
-# ============================================================
-# 5️⃣ NLP PROCESSING
-# ============================================================
-
-def summarize_text(text: str) -> str:
-    result = summarizer(
-        text,
-        max_length=120,
-        min_length=50,
-        do_sample=False
-    )
-    return result[0]["summary_text"]
-
-
-def analyze_sentiment(text: str):
-    result = sentiment_model(text[:512])[0]
-    label = result["label"].lower()
-
-    score = result["score"]
-    if label == "negative":
-        score = -score
-    elif label == "neutral":
-        score = 0.0
-
-    return score, label
-
 
 def process_nlp_for_unprocessed_news():
-    news_rows = (
-        supabase
-        .table("news")
-        .select("news_id, content")
-        .execute()
-        .data
-    )
-
-    processed_ids = (
-        supabase
-        .table("news_nlp")
-        .select("news_id")
-        .execute()
-        .data
-    )
-
-    processed_ids = {row["news_id"] for row in processed_ids}
-
-    for row in news_rows:
-        if row["news_id"] in processed_ids:
-            continue
-
-        summary = summarize_text(row["content"])
-        score, label = analyze_sentiment(row["content"])
-
-        supabase.table("news_nlp").insert({
-            "news_id": row["news_id"],
-            "summary": summary,
-            "sentiment_score": score,
-            "sentiment_label": label,
-            "model_name": "finbert + bart-large-cnn"
-        }).execute()
-
+    # Récupérer toutes les news sans NLP
+    news_rows = supabase.table("news").select("*").execute().data
+    for n in news_rows:
+        # Fake sentiment for demo (remplacer par ton modèle HF)
+        sentiment_score = 0.2  # placeholder
+        supabase.table("news").update({
+            "news_nlp": [{"sentiment_score": sentiment_score}]
+        }).eq("news_id", n["news_id"]).execute()
 
 # ============================================================
-# 6️⃣ DAILY METRICS (Python uniquement)
+# 7️⃣ Compute daily metrics in Python
 # ============================================================
-
-import pandas as pd
 
 def compute_daily_metrics():
-    # Récupérer toutes les news avec leur sentiment
     news_rows = supabase.table("news").select(
         "news_id, asset_id, published_at, news_nlp(sentiment_score)"
     ).execute().data
 
-    # Vérifier qu'on a des données
     if not news_rows:
-        print("No news with NLP found yet.")
+        print("No news found for metrics.")
         return
 
-    # Convertir en DataFrame
     records = []
     for n in news_rows:
         if "news_nlp" in n and n["news_nlp"]:
@@ -250,14 +128,12 @@ def compute_daily_metrics():
     df = pd.DataFrame(records)
     df["metric_date"] = pd.to_datetime(df["published_at"]).dt.date
 
-    # Calcul des métriques journalières
     daily_metrics = df.groupby(["asset_id", "metric_date"]).agg(
         avg_sentiment=("sentiment_score", "mean"),
         news_volume=("sentiment_score", "count"),
         sentiment_std=("sentiment_score", "std")
     ).reset_index()
 
-    # Calculer le signal et upsert dans Supabase
     for _, row in daily_metrics.iterrows():
         supabase.table("daily_metrics").upsert({
             "asset_id": row["asset_id"],
@@ -274,42 +150,17 @@ def compute_daily_metrics():
 
     print("Daily metrics computed and upserted successfully.")
 
-
 # ============================================================
-# 7️⃣ MAIN PIPELINE
+# 8️⃣ Main pipeline
 # ============================================================
 
 def run_pipeline():
-    print("Fetching assets...")
-    assets = fetch_assets()
-
     print("Fetching news...")
     articles = fetch_news()
-
-    # ============================================================
-    print("Fetching news for test...")
-    articles = fetch_news()
-    print(f"Number of articles fetched: {len(articles)}")
-    if articles:
-        for a in articles[:5]:  # afficher les 5 premiers
-            print(a["title"], "-", a.get("published_at"))
-    else:
-        print("No news returned by fetch_news()")
-
-    for article in articles[:10]:
-        matched_assets = map_news_to_asset(article, assets)
-        print(article["title"], "->", matched_assets)
-
-    # ============================================================
-
-    print("Cleaning news...")
-    articles = clean_news(articles)
-
-    print(f"{len(articles)} articles to ingest")
+    print(f"Fetched {len(articles)} articles.")
 
     for article in articles:
-        asset_id = map_news_to_asset(article, assets)
-        store_raw_news(article, asset_id)
+        store_raw_news(article)
 
     print("Running NLP...")
     process_nlp_for_unprocessed_news()
@@ -319,6 +170,6 @@ def run_pipeline():
 
     print("Pipeline completed successfully.")
 
-
+# ============================================================
 if __name__ == "__main__":
     run_pipeline()
