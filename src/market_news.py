@@ -88,7 +88,7 @@ def run_pipeline():
     print(f"{len(rows_to_insert)} articles to ingest")
 
     if rows_to_insert:
-        supabase.table("market_news").insert(rows_to_insert).execute()
+        supabase.table("market_briefs").insert(rows_to_insert).execute()
         print("News ingested successfully")
     else:
         print("No matching news found")
@@ -103,7 +103,7 @@ def compute_daily_metrics():
 
     today = datetime.now(timezone.utc).date().isoformat()
 
-    news = supabase.table("market_news") \
+    news = supabase.table("market_briefs") \
         .select("asset_id,sentiment_score") \
         .gte("published_at", f"{today}T00:00:00") \
         .execute().data
