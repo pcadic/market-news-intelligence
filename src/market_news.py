@@ -23,6 +23,7 @@ sentiment_model = pipeline(
 
 TODAY = datetime.date.today()
 
+
 # =============================
 # STEP 1 — FETCH ASSETS
 # =============================
@@ -50,8 +51,14 @@ for asset in tqdm(assets, desc="Fetching news"):
             "title": entry.title,
             "content": entry.get("summary", entry.title),
             "url": entry.link,
-            "published_at": datetime.datetime(*entry.published_parsed[:6])
+            "published_at": (
+                datetime(*entry.published_parsed[:6]).isoformat()
+                if entry.get("published_parsed")
+                else None
+            )
         })
+
+
 
 print(f"{len(news_rows)} articles fetched")
 
