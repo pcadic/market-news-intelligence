@@ -14,7 +14,6 @@ SUPABASE_KEY = os.environ["SUPABASE_SERVICE_ROLE_KEY"]
 
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-# FinBERT (standard du marché)
 sentiment_model = pipeline(
     "sentiment-analysis",
     model="ProsusAI/finbert"
@@ -48,7 +47,7 @@ def google_news_rss(query: str) -> str:
 assets = supabase.table("assets").select("asset_id, ticker").execute().data
 print(f"{len(assets)} assets found")
 
-all_news = []
+news_rows = []
 
 # ======================
 # FETCH NEWS
@@ -61,7 +60,7 @@ for asset in tqdm(assets, desc="Fetching news"):
     feed = feedparser.parse(rss_url)
 
     for entry in feed.entries:
-        all_news.append({
+        news_rows.append({
             "asset_id": asset["asset_id"],
             "title": entry.get("title"),
             "source": entry.get("source", {}).get("title"),
@@ -70,14 +69,22 @@ for asset in tqdm(assets, desc="Fetching news"):
             "content": entry.get("summary", "")
         })
 
-print(f"{len(all_news)} articles fetched")
+print(f"{len(news_rows)} articles fetched")
 
 # ======================
 # INSERT NEWS
 # ======================
 
-if all_news:
-    supabase.table("news").insert(all_news).execute()
+inserted_news = []
+
+if news_rows:
+    inserted_news = (
+        supabase
+        .table("news")
+        .insert(news_rows)
+        .execute()
+        .data
+    )
 
 # ======================
 # NLP (FinBERT)
@@ -85,18 +92,18 @@ if all_news:
 
 nlp_rows = []
 
-for row in tqdm(all_news, desc="Running sentiment"):
-    text = row["title"] or ""
+for news in tqdm(inserted_news, desc="Running sentiment"):
+    text = news["title"] or ""
     if not text:
         continue
 
     result = sentiment_model(text)[0]
 
     nlp_rows.append({
-        "asset_id": row["asset_id"],
-        "url": row["url"],
-        "sentiment": result["label"],
-        "confidence": float(result["score"])
+        "news_id": news["news_id"],
+        "sentiment_label": result["label"].lower(),
+        "sentiment_score": float(result["score"]),
+        "model_name": "ProsusAI/finbert"
     })
 
 if nlp_rows:
