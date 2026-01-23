@@ -109,4 +109,70 @@ for news in tqdm(inserted_news, desc="Running sentiment"):
 if nlp_rows:
     supabase.table("news_nlp").insert(nlp_rows).execute()
 
+# ======================
+# DAILY METRICS
+# ======================
+
+import statistics
+from collections import defaultdict
+from datetime import date
+
+def compute_daily_metrics():
+    rows = (
+        supabase
+        .table("news")
+        .select("news_id, asset_id, published_at, news_nlp(sentiment_score)")
+        .execute()
+        .data
+    )
+
+    grouped = defaultdict(list)
+
+    for r in rows:
+        if not r["news_nlp"]:
+            continue
+
+        d = r["published_at"][:10]  # YYYY-MM-DD
+        grouped[(r["asset_id"], d)].append(
+            r["news_nlp"]["sentiment_score"]
+        )
+
+    metrics = []
+
+    for (asset_id, d), scores in grouped.items():
+        avg = statistics.mean(scores)
+        std = statistics.pstdev(scores) if len(scores) > 1 else 0
+        volume = len(scores)
+
+        if avg > 0.6 and volume >= 3:
+            signal = "positive_momentum"
+        elif avg < 0.4:
+            signal = "caution"
+        elif std > 0.25:
+            signal = "high_uncertainty"
+        else:
+            signal = "neutral"
+
+        metrics.append({
+            "asset_id": asset_id,
+            "metric_date": d,
+            "avg_sentiment": round(avg, 3),
+            "sentiment_std": round(std, 3),
+            "news_volume": volume,
+            "signal": signal
+        })
+
+    if metrics:
+        supabase.table("daily_metrics").upsert(
+            metrics,
+            on_conflict="asset_id,metric_date"
+        ).execute()
+
+    print("Daily metrics computed")
+
+
+
+compute_daily_metrics()
+
 print("Pipeline completed successfully")
+
