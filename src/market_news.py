@@ -5,6 +5,7 @@ import statistics
 from supabase import create_client
 from transformers import pipeline
 from tqdm import tqdm
+from urllib.parse import quote_plus
 
 # =============================
 # CONFIG
@@ -34,7 +35,7 @@ print(f"{len(assets)} assets found")
 news_rows = []
 
 for asset in tqdm(assets, desc="Fetching news"):
-    query = f"{asset['ticker']} stock"
+    query = quote_plus(f"{asset['ticker']} stock")
     rss_url = (
         "https://news.google.com/rss/search"
         f"?q={query}&hl=en-CA&gl=CA&ceid=CA:en"
