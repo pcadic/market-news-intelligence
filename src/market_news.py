@@ -113,33 +113,39 @@ if nlp_rows:
 # DAILY METRICS
 # ======================
 
-import statistics
 from collections import defaultdict
-from datetime import date
+from datetime import datetime
+import statistics
 
 def compute_daily_metrics():
-    rows = (
-        supabase
-        .table("news")
-        .select("news_id, asset_id, published_at, news_nlp(sentiment_score)")
-        .execute()
-        .data
-    )
+    news_rows = supabase.table("news").select(
+        "news_id, asset_id, published_at"
+    ).execute().data
+
+    nlp_rows = supabase.table("news_nlp").select(
+        "news_id, sentiment_score"
+    ).execute().data
+
+    # index NLP par news_id
+    nlp_index = {
+        r["news_id"]: r["sentiment_score"]
+        for r in nlp_rows
+        if r["sentiment_score"] is not None
+    }
 
     grouped = defaultdict(list)
 
-    for r in rows:
-        if not r["news_nlp"]:
+    for n in news_rows:
+        sid = n["news_id"]
+        if sid not in nlp_index:
             continue
 
-        d = r["published_at"][:10]  # YYYY-MM-DD
-        grouped[(r["asset_id"], d)].append(
-            r["news_nlp"]["sentiment_score"]
-        )
+        day = n["published_at"][:10]  # YYYY-MM-DD
+        grouped[(n["asset_id"], day)].append(nlp_index[sid])
 
     metrics = []
 
-    for (asset_id, d), scores in grouped.items():
+    for (asset_id, day), scores in grouped.items():
         avg = statistics.mean(scores)
         std = statistics.pstdev(scores) if len(scores) > 1 else 0
         volume = len(scores)
@@ -155,7 +161,7 @@ def compute_daily_metrics():
 
         metrics.append({
             "asset_id": asset_id,
-            "metric_date": d,
+            "metric_date": day,
             "avg_sentiment": round(avg, 3),
             "sentiment_std": round(std, 3),
             "news_volume": volume,
@@ -168,7 +174,7 @@ def compute_daily_metrics():
             on_conflict="asset_id,metric_date"
         ).execute()
 
-    print("Daily metrics computed")
+    print(f"{len(metrics)} daily metrics inserted")
 
 
 
