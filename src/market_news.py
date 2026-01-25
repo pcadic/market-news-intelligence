@@ -9,7 +9,7 @@ from supabase import create_client
 # ENV
 # ==============================
 SUPABASE_URL = os.environ["SUPABASE_URL"]
-SUPABASE_KEY = os.environ["SUPABASE_KEY"]
+SUPABASE_KEY = os.environ["SUPABASE_SERVICE_ROLE_KEY"]
 HF_TOKEN = os.environ["HF_TOKEN"]
 
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
