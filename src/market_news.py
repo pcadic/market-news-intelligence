@@ -159,4 +159,42 @@ for asset in assets:
     dominant_signal = max(signal_counts, key=signal_counts.get)
 
     prompt = (
-        f"Asset: {a
+        f"Asset: {asset['name']} ({asset['ticker']})\n"
+        f"Period: {start_date} to {today}\n\n"
+        f"Metrics:\n"
+        f"- Average sentiment: {avg_sent:.2f}\n"
+        f"- News volume: {total_news}\n"
+        f"- Sentiment volatility: {avg_std:.2f}\n"
+        f"- Dominant signal: {dominant_signal}\n\n"
+        "Write a concise, professional market brief."
+    )
+
+    try:
+        response = requests.post(
+            HF_API_URL,
+            headers=HF_HEADERS,
+            json={
+                "inputs": prompt,
+                "parameters": {
+                    "max_new_tokens": 250,
+                    "temperature": 0.2,
+                    "return_full_text": False
+                }
+            },
+            timeout=60
+        )
+        response.raise_for_status()
+        output = response.json()[0]["generated_text"]
+
+        supabase.table("market_briefs").insert({
+            "period_start": start_date.isoformat(),
+            "period_end": today.isoformat(),
+            "scope": asset["ticker"],
+            "content": output,
+            "model_name": BRIEF_MODEL
+        }).execute()
+
+    except Exception as e:
+        print(f"Error generating brief for {asset['ticker']}: {e}")
+
+print("Pipeline completed successfully.")
