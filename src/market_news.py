@@ -17,7 +17,8 @@ HF_TOKEN = os.environ["HF_TOKEN"]
 LOOKBACK_DAYS = 1  # 1=daily, 7=weekly, 30=monthly
 
 SENTIMENT_MODEL = "ProsusAI/finbert"
-BRIEF_MODEL = "mistralai/Mistral-7B-Instruct-v0.2"
+BRIEF_MODEL = "tiiuae/falcon-7b-instruct"
+
 
 HF_API_URL = f"https://api-inference.huggingface.co/models/{BRIEF_MODEL}"
 HF_HEADERS = {
