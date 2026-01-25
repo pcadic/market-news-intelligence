@@ -14,10 +14,11 @@ SUPABASE_URL = os.environ["SUPABASE_URL"]
 SUPABASE_KEY = os.environ["SUPABASE_SERVICE_ROLE_KEY"]
 HF_TOKEN = os.environ["HF_TOKEN"]
 
-LOOKBACK_DAYS = 1  # 1=daily, 7=weekly, 30=monthly
+LOOKBACK_DAYS = 1  # Nombre de jours pour les briefs (1 = daily)
 
+# Modèles HF
 SENTIMENT_MODEL = "ProsusAI/finbert"
-BRIEF_MODEL = "mistralai/Mistral-7B-Instruct-v0.2"
+BRIEF_MODEL = "tiiuae/falcon-7b-instruct"  # Modèle actif pour générer les briefs
 
 HF_API_URL = f"https://api-inference.huggingface.co/models/{BRIEF_MODEL}"
 HF_HEADERS = {
@@ -43,7 +44,7 @@ assets = supabase.table("assets").select("*").execute().data
 print(f"{len(assets)} assets found")
 
 # =============================
-# 2. FETCH NEWS
+# 2. FETCH NEWS (Google News RSS)
 # =============================
 news_rows = []
 
@@ -51,7 +52,6 @@ print("Fetching news...")
 for asset in tqdm(assets):
     query = quote_plus(f"{asset['ticker']} stock")
     rss_url = f"https://news.google.com/rss/search?q={query}&hl=en-CA&gl=CA&ceid=CA:en"
-
     feed = feedparser.parse(rss_url)
 
     for entry in feed.entries:
@@ -64,16 +64,17 @@ for asset in tqdm(assets):
             "source": "Google News",
             "title": entry.title,
             "content": entry.get("summary", entry.title),
-            "url": entry.link,
+            "url": entry.get("link"),
             "published_at": published_at
         })
 
 print(f"{len(news_rows)} articles fetched")
+
 if news_rows:
-    supabase.table("news").insert(news_rows).execute()
+    supabase.table("news").upsert(news_rows, on_conflict="url").execute()
 
 # =============================
-# 3. NLP — FinBERT Sentiment
+# 3. NLP – FinBERT Sentiment
 # =============================
 news_items = supabase.table("news").select("*").execute().data
 nlp_rows = []
@@ -84,6 +85,7 @@ for item in tqdm(news_items):
 
     label = result["label"].lower()
     score = result["score"]
+
     sentiment_score = score if label == "positive" else -score if label == "negative" else 0.0
 
     nlp_rows.append({
@@ -115,7 +117,6 @@ metric_rows = []
 for (asset_id, d), scores in metrics.items():
     avg = sum(scores) / len(scores)
     std = (sum((s - avg) ** 2 for s in scores) / len(scores)) ** 0.5
-
     if avg > 0.15:
         signal = "positive_momentum"
     elif avg < -0.15:
@@ -138,67 +139,24 @@ if metric_rows:
     supabase.table("daily_metrics").upsert(metric_rows, on_conflict="asset_id,metric_date").execute()
 
 # =============================
-# 5. MARKET BRIEFS — HF API
+# 5. MARKET BRIEFS – HF API
 # =============================
 start_date = today - timedelta(days=LOOKBACK_DAYS)
-metrics = supabase.table("daily_metrics").select("*") \
-    .gte("metric_date", start_date.isoformat()).execute().data
+metrics_rows = supabase.table("daily_metrics").select("*").gte("metric_date", start_date.isoformat()).execute().data
 
 print("Generating market briefs...")
 for asset in assets:
-    rows = [m for m in metrics if m["asset_id"] == asset["asset_id"]]
-    if not rows:
+    asset_metrics = [m for m in metrics_rows if m["asset_id"] == asset["asset_id"]]
+    if not asset_metrics:
         continue
 
-    avg_sent = sum(r["avg_sentiment"] for r in rows) / len(rows)
-    total_news = sum(r["news_volume"] for r in rows)
-    avg_std = sum(r["sentiment_std"] for r in rows) / len(rows)
-    signal = max(set(r["signal"] for r in rows),
-                 key=lambda s: sum(x["signal"] == s for x in rows))
+    avg_sent = sum(m["avg_sentiment"] for m in asset_metrics) / len(asset_metrics)
+    total_news = sum(m["news_volume"] for m in asset_metrics)
+    avg_std = sum(m["sentiment_std"] for m in asset_metrics) / len(asset_metrics)
+    signal_counts = {}
+    for m in asset_metrics:
+        signal_counts[m["signal"]] = signal_counts.get(m["signal"], 0) + 1
+    dominant_signal = max(signal_counts, key=signal_counts.get)
 
     prompt = (
-        f"Asset: {asset['name']} ({asset['ticker']})\n"
-        f"Period: {start_date} to {today}\n\n"
-        f"Metrics:\n"
-        f"- Average sentiment: {avg_sent:.2f}\n"
-        f"- News volume: {total_news}\n"
-        f"- Sentiment volatility: {avg_std:.2f}\n"
-        f"- Dominant signal: {signal}\n\n"
-        f"Write a concise professional market brief."
-    )
-
-    try:
-        response = requests.post(
-            HF_API_URL,
-            headers=HF_HEADERS,
-            json={
-                "inputs": prompt,
-                "parameters": {"max_new_tokens": 250, "temperature": 0.2, "return_full_text": False}
-            },
-            timeout=60
-        )
-        response.raise_for_status()
-        data = response.json()
-        # Vérifie que la réponse contient bien du texte généré
-        if isinstance(data, list) and len(data) > 0 and "generated_text" in data[0]:
-            output = data[0]["generated_text"]
-        elif isinstance(data, dict) and "generated_text" in data:
-            output = data["generated_text"]
-        else:
-            print(f"Warning: no generated_text for asset {asset['ticker']}, skipping.")
-            continue
-
-        supabase.table("market_briefs").insert({
-            "period_start": start_date.isoformat(),
-            "period_end": today.isoformat(),
-            "scope": asset["ticker"],
-            "content": output,
-            "model_name": BRIEF_MODEL
-        }).execute()
-
-    except Exception as e:
-        print(f"Error generating brief for {asset['ticker']}: {e}")
-        continue
-
-
-print("Pipeline completed successfully.")
+        f"Asset: {a
