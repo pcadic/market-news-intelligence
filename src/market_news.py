@@ -1,4 +1,102 @@
 import os
+import requests
+import feedparser
+from datetime import datetime, date
+from tqdm import tqdm
+from supabase import create_client
+
+# ==============================
+# ENV
+# ==============================
+SUPABASE_URL = os.environ["SUPABASE_URL"]
+SUPABASE_KEY = os.environ["SUPABASE_KEY"]
+HF_TOKEN = os.environ["HF_TOKEN"]
+
+supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+
+# ==============================
+# HF CONFIG
+# ==============================
+FINBERT_MODEL = "ProsusAI/finbert"
+GEN_MODEL = "tiiuae/falcon-7b-instruct"
+
+FINBERT_API = f"https://api-inference.huggingface.co/models/{FINBERT_MODEL}"
+GEN_API = f"https://api-inference.huggingface.co/models/{GEN_MODEL}"
+
+HF_HEADERS = {
+    "Authorization": f"Bearer {HF_TOKEN}",
+    "Content-Type": "application/json"
+}
+
+# ==============================
+# LOAD ASSETS
+# ==============================
+assets = supabase.table("assets").select("*").execute().data
+print(f"{len(assets)} assets found")
+
+# ==============================
+# FETCH NEWS
+# ==============================
+news_rows = []
+
+print("Fetching news...")
+for asset in tqdm(assets, desc="Fetching news"):
+    query = f"{asset['ticker']} stock"
+    rss_url = (
+        "https://news.google.com/rss/search"
+        f"?q={query.replace(' ', '%20')}&hl=en-CA&gl=CA&ceid=CA:en"
+    )
+
+    feed = feedparser.parse(rss_url)
+
+    for entry in feed.entries:
+        if not hasattr(entry, "published_parsed"):
+            continue
+
+        published_at = datetime(
+            *entry.published_parsed[:6]
+        ).isoformat()
+
+        news_rows.append({
+            "asset_id": asset["asset_id"],
+            "source": "Google News",
+            "title": entry.title,
+            "content": entry.get("summary", entry.title),
+            "url": entry.get("link"),
+            "published_at": published_at
+        })
+
+print(f"{len(news_rows)} articles fetched")
+
+if news_rows:
+    supabase.table("news").insert(news_rows).execute()
+
+# ==============================
+# NLP – FINBERT SENTIMENT
+# ==============================
+news_items = supabase.table("news").select("*").execute().data
+nlp_rows = []
+
+print("Running sentiment analysis...")
+
+for item in tqdm(news_items, desc="Running sentiment"):
+    payload = {
+        "inputs": item["content"][:512]
+    }
+
+    response = requests.post(
+        FINBERT_API,
+        headers=HF_HEADERS,
+        json=payload,
+        timeout=30
+    )
+
+    result = response.json()
+
+    if isinstance(result, list) and len(result) > 0:
+        label = result[0]["label"].lower()
+        score = resu
+import os
 import feedparser
 import requests
 from datetime import datetime, timedelta, date
