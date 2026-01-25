@@ -1,5 +1,6 @@
 import os
 import feedparser
+import requests
 from datetime import datetime, timedelta, date
 from urllib.parse import quote_plus
 from tqdm import tqdm
@@ -12,10 +13,18 @@ from transformers import pipeline
 # =============================
 SUPABASE_URL = os.environ["SUPABASE_URL"]
 SUPABASE_KEY = os.environ["SUPABASE_SERVICE_ROLE_KEY"]
+HF_TOKEN = os.environ["HF_TOKEN"]
 
-LOOKBACK_DAYS = 1  # <-- PARAMETRABLE
+LOOKBACK_DAYS = 1  # 1=daily, 7=weekly, 30=monthly
+
 SENTIMENT_MODEL = "ProsusAI/finbert"
 BRIEF_MODEL = "mistralai/Mistral-7B-Instruct-v0.2"
+
+HF_API_URL = f"https://api-inference.huggingface.co/models/{BRIEF_MODEL}"
+HF_HEADERS = {
+    "Authorization": f"Bearer {HF_TOKEN}",
+    "Content-Type": "application/json"
+}
 
 # =============================
 # CLIENTS
@@ -28,14 +37,6 @@ sentiment_pipeline = pipeline(
     tokenizer=SENTIMENT_MODEL
 )
 
-brief_pipeline = pipeline(
-    "text-generation",
-    model=BRIEF_MODEL,
-    tokenizer=BRIEF_MODEL,
-    max_new_tokens=250,
-    do_sample=False
-)
-
 # =============================
 # 1. FETCH ASSETS
 # =============================
@@ -43,7 +44,7 @@ assets = supabase.table("assets").select("*").execute().data
 print(f"{len(assets)} assets found")
 
 # =============================
-# 2. FETCH NEWS (RSS)
+# 2. FETCH NEWS
 # =============================
 news_rows = []
 
@@ -78,10 +79,9 @@ if news_rows:
     supabase.table("news").insert(news_rows).execute()
 
 # =============================
-# 3. NLP (FinBERT)
+# 3. NLP — FinBERT
 # =============================
 news = supabase.table("news").select("*").execute().data
-
 nlp_rows = []
 
 print("Running sentiment...")
@@ -91,7 +91,11 @@ for item in tqdm(news):
     label = result["label"].lower()
     score = result["score"]
 
-    sentiment_score = score if label == "positive" else -score if label == "negative" else 0.0
+    sentiment_score = (
+        score if label == "positive"
+        else -score if label == "negative"
+        else 0.0
+    )
 
     nlp_rows.append({
         "news_id": item["news_id"],
@@ -102,25 +106,24 @@ for item in tqdm(news):
     })
 
 if nlp_rows:
-    supabase.table("news_nlp").upsert(nlp_rows, on_conflict="news_id").execute()
+    supabase.table("news_nlp").upsert(
+        nlp_rows, on_conflict="news_id"
+    ).execute()
 
 # =============================
 # 4. DAILY METRICS
 # =============================
 today = date.today()
-
 metrics = {}
 
-for row in supabase.table("news_nlp") \
+rows = supabase.table("news_nlp") \
     .select("sentiment_score, news:news_id(asset_id, published_at)") \
-    .execute().data:
+    .execute().data
 
+for row in rows:
     asset_id = row["news"]["asset_id"]
     d = row["news"]["published_at"][:10]
-
-    key = (asset_id, d)
-
-    metrics.setdefault(key, []).append(row["sentiment_score"])
+    metrics.setdefault((asset_id, d), []).append(row["sentiment_score"])
 
 metric_rows = []
 
@@ -153,7 +156,7 @@ if metric_rows:
     ).execute()
 
 # =============================
-# 5. MARKET BRIEFS (PER ASSET)
+# 5. MARKET BRIEFS — HF API
 # =============================
 start_date = today - timedelta(days=LOOKBACK_DAYS)
 
@@ -166,30 +169,41 @@ print("Generating market briefs...")
 
 for asset in assets:
     rows = [m for m in metrics if m["asset_id"] == asset["asset_id"]]
-
     if not rows:
         continue
 
     avg_sent = sum(r["avg_sentiment"] for r in rows) / len(rows)
     total_news = sum(r["news_volume"] for r in rows)
     avg_std = sum(r["sentiment_std"] for r in rows) / len(rows)
+    signal = max(set(r["signal"] for r in rows),
+                 key=lambda s: sum(x["signal"] == s for x in rows))
 
-    signal = max(set(r["signal"] for r in rows), key=lambda s: sum(x["signal"] == s for x in rows))
+    prompt = (
+        f"Asset: {asset['name']} ({asset['ticker']})\n"
+        f"Period: {start_date} to {today}\n\n"
+        f"Metrics:\n"
+        f"- Average sentiment: {avg_sent:.2f}\n"
+        f"- News volume: {total_news}\n"
+        f"- Sentiment volatility: {avg_std:.2f}\n"
+        f"- Dominant signal: {signal}\n\n"
+        f"Write a concise professional market brief."
+    )
 
-    prompt = f"""
-Asset: {asset['name']} ({asset['ticker']})
-Period: {start_date} to {today}
+    response = requests.post(
+        HF_API_URL,
+        headers=HF_HEADERS,
+        json={
+            "inputs": prompt,
+            "parameters": {
+                "max_new_tokens": 250,
+                "temperature": 0.2,
+                "return_full_text": False
+            }
+        },
+        timeout=60
+    )
 
-Metrics:
-- Average sentiment: {avg_sent:.2f}
-- News volume: {total_news}
-- Sentiment volatility: {avg_std:.2f}
-- Dominant signal: {signal}
-
-Write a concise professional market brief.
-"""
-
-    output = brief_pipeline(prompt)[0]["generated_text"]
+    output = response.json()[0]["generated_text"]
 
     supabase.table("market_briefs").insert({
         "period_start": start_date.isoformat(),
