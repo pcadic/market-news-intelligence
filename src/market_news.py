@@ -117,6 +117,10 @@ from collections import defaultdict
 from datetime import datetime
 import statistics
 
+from collections import defaultdict
+from datetime import datetime
+import statistics
+
 def compute_daily_metrics():
     news_rows = supabase.table("news").select(
         "news_id, asset_id, published_at"
@@ -175,7 +179,6 @@ def compute_daily_metrics():
         ).execute()
 
     print(f"{len(metrics)} daily metrics inserted")
-
 
 
 compute_daily_metrics()
