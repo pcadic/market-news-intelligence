@@ -4,6 +4,7 @@ import requests
 from datetime import datetime, timedelta, date
 from urllib.parse import quote_plus
 from tqdm import tqdm
+
 from supabase import create_client, Client
 from transformers import pipeline
 
@@ -17,12 +18,9 @@ HF_TOKEN = os.environ["HF_TOKEN"]
 LOOKBACK_DAYS = 1  # 1=daily, 7=weekly, 30=monthly
 
 SENTIMENT_MODEL = "ProsusAI/finbert"
-BRIEF_MODEL_PRIMARY = "tiiuae/falcon-7b-instruct"
-BRIEF_MODEL_FALLBACK = "google/flan-t5-small"
+BRIEF_MODEL = "tiiuae/falcon-7b-instruct"  # modèle gratuit et accessible
 
-HF_API_PRIMARY = f"https://api-inference.huggingface.co/models/{BRIEF_MODEL_PRIMARY}"
-HF_API_FALLBACK = f"https://api-inference.huggingface.co/models/{BRIEF_MODEL_FALLBACK}"
-
+HF_API_URL = f"https://api-inference.huggingface.co/models/{BRIEF_MODEL}"
 HF_HEADERS = {
     "Authorization": f"Bearer {HF_TOKEN}",
     "Content-Type": "application/json"
@@ -74,8 +72,12 @@ for asset in tqdm(assets):
 
 print(f"{len(news_rows)} articles fetched")
 
+# -----------------------------
+# DÉDUPLICATION par URL avant insertion
+# -----------------------------
+news_rows = list({n['url']: n for n in news_rows}.values())
+
 if news_rows:
-    # Assurez-vous que la colonne 'url' a une contrainte UNIQUE dans la table news
     supabase.table("news").upsert(news_rows, on_conflict="url").execute()
 
 # =============================
@@ -84,7 +86,7 @@ if news_rows:
 news = supabase.table("news").select("*").execute().data
 nlp_rows = []
 
-print("Running sentiment analysis...")
+print("Running sentiment...")
 for item in tqdm(news):
     result = sentiment_pipeline(item["content"][:512])[0]
 
@@ -147,7 +149,7 @@ if metric_rows:
     supabase.table("daily_metrics").upsert(metric_rows, on_conflict="asset_id,metric_date").execute()
 
 # =============================
-# 5. MARKET BRIEFS — HF API avec fallback
+# 5. MARKET BRIEFS — HF API
 # =============================
 start_date = today - timedelta(days=LOOKBACK_DAYS)
 
@@ -180,29 +182,30 @@ for asset in assets:
         f"Write a concise professional market brief."
     )
 
-    for api_url, model_name in [(HF_API_PRIMARY, BRIEF_MODEL_PRIMARY), (HF_API_FALLBACK, BRIEF_MODEL_FALLBACK)]:
-        try:
-            response = requests.post(
-                api_url,
-                headers=HF_HEADERS,
-                json={
-                    "inputs": prompt,
-                    "parameters": {"max_new_tokens": 250, "temperature": 0.2, "return_full_text": False}
-                },
-                timeout=60
-            )
-            response.raise_for_status()
-            output = response.json()[0]["generated_text"]
-            supabase.table("market_briefs").insert({
-                "period_start": start_date.isoformat(),
-                "period_end": today.isoformat(),
-                "scope": asset["ticker"],
-                "content": output,
-                "model_name": model_name
-            }).execute()
-            break  # succès, on sort de la boucle
-        except Exception as e:
-            print(f"Error generating brief for {asset['ticker']} with {model_name}: {e}")
-            continue  # essai du modèle fallback
+    try:
+        response = requests.post(
+            HF_API_URL,
+            headers=HF_HEADERS,
+            json={
+                "inputs": prompt,
+                "parameters": {
+                    "max_new_tokens": 250,
+                    "temperature": 0.2,
+                    "return_full_text": False
+                }
+            },
+            timeout=60
+        )
+        response.raise_for_status()
+        output = response.json()[0]["generated_text"]
+        supabase.table("market_briefs").insert({
+            "period_start": start_date.isoformat(),
+            "period_end": today.isoformat(),
+            "scope": asset["ticker"],
+            "content": output,
+            "model_name": BRIEF_MODEL
+        }).execute()
+    except Exception as e:
+        print(f"Error generating brief for {asset['ticker']}: {e}")
 
 print("Pipeline completed successfully.")
