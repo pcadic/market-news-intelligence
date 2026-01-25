@@ -1,187 +1,202 @@
 import os
 import feedparser
-from datetime import datetime, timezone
-from supabase import create_client
+from datetime import datetime, timedelta, date
+from urllib.parse import quote_plus
 from tqdm import tqdm
+
+from supabase import create_client, Client
 from transformers import pipeline
 
-# ======================
+# =============================
 # CONFIG
-# ======================
-
+# =============================
 SUPABASE_URL = os.environ["SUPABASE_URL"]
 SUPABASE_KEY = os.environ["SUPABASE_SERVICE_ROLE_KEY"]
 
-supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+LOOKBACK_DAYS = 1  # <-- PARAMETRABLE
+SENTIMENT_MODEL = "ProsusAI/finbert"
+BRIEF_MODEL = "mistralai/Mistral-7B-Instruct-v0.2"
 
-sentiment_model = pipeline(
+# =============================
+# CLIENTS
+# =============================
+supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+
+sentiment_pipeline = pipeline(
     "sentiment-analysis",
-    model="ProsusAI/finbert"
+    model=SENTIMENT_MODEL,
+    tokenizer=SENTIMENT_MODEL
 )
 
-# ======================
-# UTILS
-# ======================
+brief_pipeline = pipeline(
+    "text-generation",
+    model=BRIEF_MODEL,
+    tokenizer=BRIEF_MODEL,
+    max_new_tokens=250,
+    do_sample=False
+)
 
-def to_iso_datetime(entry):
-    if hasattr(entry, "published_parsed") and entry.published_parsed:
-        return datetime(
-            *entry.published_parsed[:6],
-            tzinfo=timezone.utc
-        ).isoformat()
-    return None
-
-
-def google_news_rss(query: str) -> str:
-    query = query.replace(" ", "%20")
-    return (
-        "https://news.google.com/rss/search"
-        f"?q={query}"
-        "&hl=en-CA&gl=CA&ceid=CA:en"
-    )
-
-# ======================
-# LOAD ASSETS
-# ======================
-
-assets = supabase.table("assets").select("asset_id, ticker").execute().data
+# =============================
+# 1. FETCH ASSETS
+# =============================
+assets = supabase.table("assets").select("*").execute().data
 print(f"{len(assets)} assets found")
 
+# =============================
+# 2. FETCH NEWS (RSS)
+# =============================
 news_rows = []
 
-# ======================
-# FETCH NEWS
-# ======================
-
-for asset in tqdm(assets, desc="Fetching news"):
-    ticker = asset["ticker"]
-    rss_url = google_news_rss(f"{ticker} stock")
+print("Fetching news...")
+for asset in tqdm(assets):
+    query = quote_plus(f"{asset['ticker']} stock")
+    rss_url = (
+        "https://news.google.com/rss/search"
+        f"?q={query}&hl=en-CA&gl=CA&ceid=CA:en"
+    )
 
     feed = feedparser.parse(rss_url)
 
     for entry in feed.entries:
+        if not hasattr(entry, "published_parsed"):
+            continue
+
+        published = datetime(*entry.published_parsed[:6]).isoformat()
+
         news_rows.append({
             "asset_id": asset["asset_id"],
-            "title": entry.get("title"),
-            "source": entry.get("source", {}).get("title"),
-            "url": entry.get("link"),
-            "published_at": to_iso_datetime(entry),
-            "content": entry.get("summary", "")
+            "source": "Google News",
+            "title": entry.title,
+            "content": entry.get("summary", entry.title),
+            "url": entry.link,
+            "published_at": published
         })
 
 print(f"{len(news_rows)} articles fetched")
 
-# ======================
-# INSERT NEWS
-# ======================
-
-inserted_news = []
-
 if news_rows:
-    inserted_news = (
-        supabase
-        .table("news")
-        .insert(news_rows)
-        .execute()
-        .data
-    )
+    supabase.table("news").insert(news_rows).execute()
 
-# ======================
-# NLP (FinBERT)
-# ======================
+# =============================
+# 3. NLP (FinBERT)
+# =============================
+news = supabase.table("news").select("*").execute().data
 
 nlp_rows = []
 
-for news in tqdm(inserted_news, desc="Running sentiment"):
-    text = news["title"] or ""
-    if not text:
-        continue
+print("Running sentiment...")
+for item in tqdm(news):
+    result = sentiment_pipeline(item["content"][:512])[0]
 
-    result = sentiment_model(text)[0]
+    label = result["label"].lower()
+    score = result["score"]
+
+    sentiment_score = score if label == "positive" else -score if label == "negative" else 0.0
 
     nlp_rows.append({
-        "news_id": news["news_id"],
-        "sentiment_label": result["label"].lower(),
-        "sentiment_score": float(result["score"]),
-        "model_name": "ProsusAI/finbert"
+        "news_id": item["news_id"],
+        "summary": item["content"][:300],
+        "sentiment_score": sentiment_score,
+        "sentiment_label": label,
+        "model_name": SENTIMENT_MODEL
     })
 
 if nlp_rows:
-    supabase.table("news_nlp").insert(nlp_rows).execute()
+    supabase.table("news_nlp").upsert(nlp_rows, on_conflict="news_id").execute()
 
-# ======================
-# DAILY METRICS
-# ======================
+# =============================
+# 4. DAILY METRICS
+# =============================
+today = date.today()
 
-from collections import defaultdict
-from datetime import datetime
-import statistics
+metrics = {}
 
-from collections import defaultdict
-from datetime import datetime
-import statistics
+for row in supabase.table("news_nlp") \
+    .select("sentiment_score, news:news_id(asset_id, published_at)") \
+    .execute().data:
 
-def compute_daily_metrics():
-    news_rows = supabase.table("news").select(
-        "news_id, asset_id, published_at"
-    ).execute().data
+    asset_id = row["news"]["asset_id"]
+    d = row["news"]["published_at"][:10]
 
-    nlp_rows = supabase.table("news_nlp").select(
-        "news_id, sentiment_score"
-    ).execute().data
+    key = (asset_id, d)
 
-    # index NLP par news_id
-    nlp_index = {
-        r["news_id"]: r["sentiment_score"]
-        for r in nlp_rows
-        if r["sentiment_score"] is not None
-    }
+    metrics.setdefault(key, []).append(row["sentiment_score"])
 
-    grouped = defaultdict(list)
+metric_rows = []
 
-    for n in news_rows:
-        sid = n["news_id"]
-        if sid not in nlp_index:
-            continue
+for (asset_id, d), scores in metrics.items():
+    avg = sum(scores) / len(scores)
+    std = (sum((s - avg) ** 2 for s in scores) / len(scores)) ** 0.5
 
-        day = n["published_at"][:10]  # YYYY-MM-DD
-        grouped[(n["asset_id"], day)].append(nlp_index[sid])
+    if avg > 0.15:
+        signal = "positive_momentum"
+    elif avg < -0.15:
+        signal = "caution"
+    elif std > 0.5:
+        signal = "high_uncertainty"
+    else:
+        signal = "neutral"
 
-    metrics = []
+    metric_rows.append({
+        "asset_id": asset_id,
+        "metric_date": d,
+        "avg_sentiment": avg,
+        "news_volume": len(scores),
+        "sentiment_std": std,
+        "signal": signal
+    })
 
-    for (asset_id, day), scores in grouped.items():
-        avg = statistics.mean(scores)
-        std = statistics.pstdev(scores) if len(scores) > 1 else 0
-        volume = len(scores)
+if metric_rows:
+    supabase.table("daily_metrics").upsert(
+        metric_rows,
+        on_conflict="asset_id,metric_date"
+    ).execute()
 
-        if avg > 0.6 and volume >= 3:
-            signal = "positive_momentum"
-        elif avg < 0.4:
-            signal = "caution"
-        elif std > 0.25:
-            signal = "high_uncertainty"
-        else:
-            signal = "neutral"
+# =============================
+# 5. MARKET BRIEFS (PER ASSET)
+# =============================
+start_date = today - timedelta(days=LOOKBACK_DAYS)
 
-        metrics.append({
-            "asset_id": asset_id,
-            "metric_date": day,
-            "avg_sentiment": round(avg, 3),
-            "sentiment_std": round(std, 3),
-            "news_volume": volume,
-            "signal": signal
-        })
+metrics = supabase.table("daily_metrics") \
+    .select("*") \
+    .gte("metric_date", start_date.isoformat()) \
+    .execute().data
 
-    if metrics:
-        supabase.table("daily_metrics").upsert(
-            metrics,
-            on_conflict="asset_id,metric_date"
-        ).execute()
+print("Generating market briefs...")
 
-    print(f"{len(metrics)} daily metrics inserted")
+for asset in assets:
+    rows = [m for m in metrics if m["asset_id"] == asset["asset_id"]]
 
+    if not rows:
+        continue
 
-compute_daily_metrics()
+    avg_sent = sum(r["avg_sentiment"] for r in rows) / len(rows)
+    total_news = sum(r["news_volume"] for r in rows)
+    avg_std = sum(r["sentiment_std"] for r in rows) / len(rows)
 
-print("Pipeline completed successfully")
+    signal = max(set(r["signal"] for r in rows), key=lambda s: sum(x["signal"] == s for x in rows))
 
+    prompt = f"""
+Asset: {asset['name']} ({asset['ticker']})
+Period: {start_date} to {today}
+
+Metrics:
+- Average sentiment: {avg_sent:.2f}
+- News volume: {total_news}
+- Sentiment volatility: {avg_std:.2f}
+- Dominant signal: {signal}
+
+Write a concise professional market brief.
+"""
+
+    output = brief_pipeline(prompt)[0]["generated_text"]
+
+    supabase.table("market_briefs").insert({
+        "period_start": start_date.isoformat(),
+        "period_end": today.isoformat(),
+        "scope": asset["ticker"],
+        "content": output,
+        "model_name": BRIEF_MODEL
+    }).execute()
+
+print("Pipeline completed successfully.")
