@@ -141,7 +141,8 @@ if metric_rows:
 # 5. MARKET BRIEFS — HF API
 # =============================
 start_date = today - timedelta(days=LOOKBACK_DAYS)
-metrics = supabase.table("daily_metrics").select("*").gte("metric_date", start_date.isoformat()).execute().data
+metrics = supabase.table("daily_metrics").select("*") \
+    .gte("metric_date", start_date.isoformat()).execute().data
 
 print("Generating market briefs...")
 for asset in assets:
@@ -152,7 +153,8 @@ for asset in assets:
     avg_sent = sum(r["avg_sentiment"] for r in rows) / len(rows)
     total_news = sum(r["news_volume"] for r in rows)
     avg_std = sum(r["sentiment_std"] for r in rows) / len(rows)
-    signal = max(set(r["signal"] for r in rows), key=lambda s: sum(x["signal"] == s for x in rows))
+    signal = max(set(r["signal"] for r in rows),
+                 key=lambda s: sum(x["signal"] == s for x in rows))
 
     prompt = (
         f"Asset: {asset['name']} ({asset['ticker']})\n"
@@ -165,20 +167,38 @@ for asset in assets:
         f"Write a concise professional market brief."
     )
 
-    response = requests.post(
-        HF_API_URL,
-        headers=HF_HEADERS,
-        json={"inputs": prompt, "parameters": {"max_new_tokens": 250, "temperature": 0.2, "return_full_text": False}},
-        timeout=60
-    )
-    output = response.json()[0]["generated_text"]
+    try:
+        response = requests.post(
+            HF_API_URL,
+            headers=HF_HEADERS,
+            json={
+                "inputs": prompt,
+                "parameters": {"max_new_tokens": 250, "temperature": 0.2, "return_full_text": False}
+            },
+            timeout=60
+        )
+        response.raise_for_status()
+        data = response.json()
+        # Vérifie que la réponse contient bien du texte généré
+        if isinstance(data, list) and len(data) > 0 and "generated_text" in data[0]:
+            output = data[0]["generated_text"]
+        elif isinstance(data, dict) and "generated_text" in data:
+            output = data["generated_text"]
+        else:
+            print(f"Warning: no generated_text for asset {asset['ticker']}, skipping.")
+            continue
 
-    supabase.table("market_briefs").insert({
-        "period_start": start_date.isoformat(),
-        "period_end": today.isoformat(),
-        "scope": asset["ticker"],
-        "content": output,
-        "model_name": BRIEF_MODEL
-    }).execute()
+        supabase.table("market_briefs").insert({
+            "period_start": start_date.isoformat(),
+            "period_end": today.isoformat(),
+            "scope": asset["ticker"],
+            "content": output,
+            "model_name": BRIEF_MODEL
+        }).execute()
+
+    except Exception as e:
+        print(f"Error generating brief for {asset['ticker']}: {e}")
+        continue
+
 
 print("Pipeline completed successfully.")
