@@ -21,6 +21,7 @@ jobs:
 
       - name: Run pipeline
         env:
+            HF_TOKEN: ${{ secrets.HF_TOKEN }}
             SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
             SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
         run: python src/market_news.py
