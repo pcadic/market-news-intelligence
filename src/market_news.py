@@ -4,7 +4,6 @@ import requests
 from datetime import datetime, timedelta, date
 from urllib.parse import quote_plus
 from tqdm import tqdm
-
 from supabase import create_client, Client
 from transformers import pipeline
 
@@ -18,9 +17,12 @@ HF_TOKEN = os.environ["HF_TOKEN"]
 LOOKBACK_DAYS = 1  # 1=daily, 7=weekly, 30=monthly
 
 SENTIMENT_MODEL = "ProsusAI/finbert"
-BRIEF_MODEL = "tiiuae/falcon-7b-instruct"  # gratuit et accessible
+BRIEF_MODEL_PRIMARY = "tiiuae/falcon-7b-instruct"
+BRIEF_MODEL_FALLBACK = "google/flan-t5-small"
 
-HF_API_URL = f"https://api-inference.huggingface.co/models/{BRIEF_MODEL}"
+HF_API_PRIMARY = f"https://api-inference.huggingface.co/models/{BRIEF_MODEL_PRIMARY}"
+HF_API_FALLBACK = f"https://api-inference.huggingface.co/models/{BRIEF_MODEL_FALLBACK}"
+
 HF_HEADERS = {
     "Authorization": f"Bearer {HF_TOKEN}",
     "Content-Type": "application/json"
@@ -49,38 +51,32 @@ print(f"{len(assets)} assets found")
 news_rows = []
 
 print("Fetching news...")
-for asset in tqdm(assets, desc="Fetching news"):
+for asset in tqdm(assets):
     query = quote_plus(f"{asset['ticker']} stock")
     rss_url = f"https://news.google.com/rss/search?q={query}&hl=en-CA&gl=CA&ceid=CA:en"
+
     feed = feedparser.parse(rss_url)
 
     for entry in feed.entries:
         if not hasattr(entry, "published_parsed"):
             continue
+
         published = datetime(*entry.published_parsed[:6]).isoformat()
+
         news_rows.append({
             "asset_id": asset["asset_id"],
             "source": "Google News",
             "title": entry.title,
             "content": entry.get("summary", entry.title),
-            "url": entry.get("link"),
+            "url": entry.link,
             "published_at": published
         })
 
 print(f"{len(news_rows)} articles fetched")
 
-# Déduplication robuste
-seen_urls = set()
-deduped_rows = []
-for row in news_rows:
-    url = row["url"].strip().lower()  # enlever espaces + uniformiser
-    if url not in seen_urls:
-        row["url"] = url
-        deduped_rows.append(row)
-        seen_urls.add(url)
-
-if deduped_rows:
-    supabase.table("news").upsert(deduped_rows, on_conflict="url").execute()
+if news_rows:
+    # Assurez-vous que la colonne 'url' a une contrainte UNIQUE dans la table news
+    supabase.table("news").upsert(news_rows, on_conflict="url").execute()
 
 # =============================
 # 3. NLP — FinBERT
@@ -89,16 +85,13 @@ news = supabase.table("news").select("*").execute().data
 nlp_rows = []
 
 print("Running sentiment analysis...")
-for item in tqdm(news, desc="Sentiment"):
+for item in tqdm(news):
     result = sentiment_pipeline(item["content"][:512])[0]
+
     label = result["label"].lower()
     score = result["score"]
 
-    sentiment_score = (
-        score if label == "positive"
-        else -score if label == "negative"
-        else 0.0
-    )
+    sentiment_score = score if label == "positive" else -score if label == "negative" else 0.0
 
     nlp_rows.append({
         "news_id": item["news_id"],
@@ -109,28 +102,29 @@ for item in tqdm(news, desc="Sentiment"):
     })
 
 if nlp_rows:
-    supabase.table("news_nlp").upsert(
-        nlp_rows, on_conflict="news_id"
-    ).execute()
+    supabase.table("news_nlp").upsert(nlp_rows, on_conflict="news_id").execute()
 
 # =============================
 # 4. DAILY METRICS
 # =============================
 today = date.today()
+metrics = {}
+
 rows = supabase.table("news_nlp") \
     .select("sentiment_score, news:news_id(asset_id, published_at)") \
     .execute().data
 
-metrics = {}
 for row in rows:
     asset_id = row["news"]["asset_id"]
     d = row["news"]["published_at"][:10]
     metrics.setdefault((asset_id, d), []).append(row["sentiment_score"])
 
 metric_rows = []
+
 for (asset_id, d), scores in metrics.items():
     avg = sum(scores) / len(scores)
     std = (sum((s - avg) ** 2 for s in scores) / len(scores)) ** 0.5
+
     if avg > 0.15:
         signal = "positive_momentum"
     elif avg < -0.15:
@@ -139,6 +133,7 @@ for (asset_id, d), scores in metrics.items():
         signal = "high_uncertainty"
     else:
         signal = "neutral"
+
     metric_rows.append({
         "asset_id": asset_id,
         "metric_date": d,
@@ -149,21 +144,20 @@ for (asset_id, d), scores in metrics.items():
     })
 
 if metric_rows:
-    supabase.table("daily_metrics").upsert(
-        metric_rows,
-        on_conflict="asset_id,metric_date"
-    ).execute()
+    supabase.table("daily_metrics").upsert(metric_rows, on_conflict="asset_id,metric_date").execute()
 
 # =============================
-# 5. MARKET BRIEFS — HF API
+# 5. MARKET BRIEFS — HF API avec fallback
 # =============================
 start_date = today - timedelta(days=LOOKBACK_DAYS)
+
 metrics = supabase.table("daily_metrics") \
     .select("*") \
     .gte("metric_date", start_date.isoformat()) \
     .execute().data
 
 print("Generating market briefs...")
+
 for asset in assets:
     rows = [m for m in metrics if m["asset_id"] == asset["asset_id"]]
     if not rows:
@@ -186,25 +180,29 @@ for asset in assets:
         f"Write a concise professional market brief."
     )
 
-    try:
-        response = requests.post(
-            HF_API_URL,
-            headers=HF_HEADERS,
-            json={"inputs": prompt, "parameters": {"max_new_tokens": 250, "temperature": 0.2, "return_full_text": False}},
-            timeout=60
-        )
-        response.raise_for_status()
-        output = response.json()[0].get("generated_text", "")
-    except Exception as e:
-        print(f"Error generating brief for {asset['ticker']}: {e}")
-        continue
-
-    supabase.table("market_briefs").insert({
-        "period_start": start_date.isoformat(),
-        "period_end": today.isoformat(),
-        "scope": asset["ticker"],
-        "content": output,
-        "model_name": BRIEF_MODEL
-    }).execute()
+    for api_url, model_name in [(HF_API_PRIMARY, BRIEF_MODEL_PRIMARY), (HF_API_FALLBACK, BRIEF_MODEL_FALLBACK)]:
+        try:
+            response = requests.post(
+                api_url,
+                headers=HF_HEADERS,
+                json={
+                    "inputs": prompt,
+                    "parameters": {"max_new_tokens": 250, "temperature": 0.2, "return_full_text": False}
+                },
+                timeout=60
+            )
+            response.raise_for_status()
+            output = response.json()[0]["generated_text"]
+            supabase.table("market_briefs").insert({
+                "period_start": start_date.isoformat(),
+                "period_end": today.isoformat(),
+                "scope": asset["ticker"],
+                "content": output,
+                "model_name": model_name
+            }).execute()
+            break  # succès, on sort de la boucle
+        except Exception as e:
+            print(f"Error generating brief for {asset['ticker']} with {model_name}: {e}")
+            continue  # essai du modèle fallback
 
 print("Pipeline completed successfully.")
