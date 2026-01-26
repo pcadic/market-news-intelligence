@@ -1,6 +1,7 @@
+# Streamlit
 streamlit==1.31.1
 
-# Data
+# Data manipulation
 pandas==2.1.4
 numpy==1.26.4
 
@@ -8,10 +9,8 @@ numpy==1.26.4
 supabase==2.1.1
 python-dotenv==1.0.1
 
-# News fetching
+# Utilities
+tqdm==4.66.1
 requests==2.31.0
 feedparser==6.0.10
 beautifulsoup4==4.12.3
-
-# Utils
-tqdm==4.66.1
