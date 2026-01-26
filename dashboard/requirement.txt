@@ -3,6 +3,5 @@ pandas==2.1.4
 numpy==1.26.4
 supabase==2.1.1
 python-dotenv==1.0.1
-gotrue==2.0.0
 tqdm==4.66.1
 requests==2.31.0
