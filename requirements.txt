@@ -7,18 +7,11 @@ numpy==1.26.4
 # Database
 supabase==2.1.1
 python-dotenv==1.0.1
-gotrue==2.0.0
 
-# NLP / LLM (Hugging Face)
-transformers==4.36.2
-torch==2.1.2
-sentencepiece==0.1.99
-
-# News ingestion
+# News fetching
 requests==2.31.0
-beautifulsoup4==4.12.3
 feedparser==6.0.10
-yfinance==0.2.36
+beautifulsoup4==4.12.3
 
 # Utils
 tqdm==4.66.1
