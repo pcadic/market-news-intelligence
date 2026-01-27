@@ -63,7 +63,7 @@ st.markdown(
 metrics_res = supabase.table("daily_metrics") \
     .select("*") \
     .eq("asset_id", selected_asset_id) \
-    .order("date", desc=True) \
+    .order("created_at", desc=True) \
     .limit(1) \
     .execute()
 
