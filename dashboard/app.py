@@ -73,7 +73,7 @@ if metrics_res.data:
     col1, col2, col3, col4 = st.columns(4)
 
     col1.metric("Average sentiment", f"{m['avg_sentiment']:.2f}")
-    col2.metric("News volume", m["news_count"])
+    col2.metric("News volume", m["news_volume"])
     col3.metric("Sentiment volatility", f"{m['sentiment_volatility']:.2f}")
     col4.metric("Signal", m["signal"])
 else:
