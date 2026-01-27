@@ -26,7 +26,7 @@ SENTIMENT_MODEL = "ProsusAI/finbert"
 
 
 # =============================
-# LOAD NLP PIPELINE (LOCAL)
+# LOAD FINBERT (LOCAL)
 # =============================
 sentiment_pipeline = pipeline(
     "sentiment-analysis",
@@ -43,7 +43,7 @@ print(f"{len(assets)} assets found")
 
 
 # =============================
-# 2. FETCH NEWS (GOOGLE NEWS RSS)
+# 2. FETCH NEWS (GOOGLE NEWS)
 # =============================
 news_rows = []
 seen_urls = set()
@@ -122,13 +122,12 @@ for item in tqdm(news_items, desc="Running sentiment"):
 
 if nlp_rows:
     supabase.table("news_nlp").upsert(
-        nlp_rows,
-        on_conflict="news_id"
+        nlp_rows, on_conflict="news_id"
     ).execute()
 
 
 # =============================
-# 4. DAILY METRICS (ROBUST SIGNAL)
+# 4. DAILY METRICS (MEILLEUR SIGNAL)
 # =============================
 metrics = defaultdict(list)
 
@@ -149,13 +148,13 @@ for (asset_id, d), scores in metrics.items():
     volume = len(scores)
 
     if volume < 3:
-        signal = "neutral"
-    elif std > 0.30:
+        signal = "low_coverage"
+    elif std > 0.35:
         signal = "high_uncertainty"
-    elif avg > 0.10:
+    elif avg > 0.15:
         signal = "positive_momentum"
-    elif avg < -0.10:
-        signal = "caution"
+    elif avg < -0.15:
+        signal = "negative_pressure"
     else:
         signal = "neutral"
 
@@ -176,7 +175,7 @@ if metric_rows:
 
 
 # =============================
-# 5. MARKET BRIEFS (RULE-BASED)
+# 5. MARKET BRIEFS (RULE-BASED, EXPLICABLE)
 # =============================
 today = date.today()
 start_date = today - timedelta(days=LOOKBACK_DAYS)
@@ -195,4 +194,26 @@ for asset in assets:
 
     avg_sent = sum(r["avg_sentiment"] for r in rows) / len(rows)
     total_news = sum(r["news_volume"] for r in rows)
-    dominant_signal =
+    dominant_signal = max(
+        set(r["signal"] for r in rows),
+        key=lambda s: sum(x["signal"] == s for x in rows)
+    )
+
+    content = (
+        f"Over the past {LOOKBACK_DAYS} days, {asset['name']} ({asset['ticker']}) "
+        f"was mentioned in {total_news} news articles. "
+        f"The average sentiment score was {avg_sent:.2f}. "
+        f"The dominant market signal is **{dominant_signal.replace('_', ' ')}**. "
+        f"This signal reflects the balance between sentiment strength, volatility, "
+        f"and news coverage."
+    )
+
+    supabase.table("market_briefs").insert({
+        "period_start": start_date.isoformat(),
+        "period_end": today.isoformat(),
+        "scope": asset["ticker"],
+        "content": content,
+        "model_name": "rule_based_v1"
+    }).execute()
+
+print("Pipeline completed successfully.")
