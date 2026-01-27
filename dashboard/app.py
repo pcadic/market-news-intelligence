@@ -19,10 +19,10 @@ SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 # -------------------------------------------------
-# Load assets
+# Load assets (FIXED COLUMN NAME)
 # -------------------------------------------------
 assets_res = supabase.table("assets").select(
-    "id, name, ticker"
+    "asset_id, name, ticker"
 ).order("name").execute()
 
 assets_df = pd.DataFrame(assets_res.data)
@@ -32,20 +32,20 @@ if assets_df.empty:
     st.stop()
 
 # -------------------------------------------------
-# Asset selector (FIXED)
+# Asset selector (robust)
 # -------------------------------------------------
-asset_id = st.selectbox(
+selected_asset_id = st.selectbox(
     "Select an asset",
-    options=assets_df["id"].tolist(),
+    options=assets_df["asset_id"].tolist(),
     format_func=lambda x: (
-        assets_df.loc[assets_df["id"] == x, "name"].values[0]
+        assets_df.loc[assets_df["asset_id"] == x, "name"].values[0]
         + " ("
-        + assets_df.loc[assets_df["id"] == x, "ticker"].values[0]
+        + assets_df.loc[assets_df["asset_id"] == x, "ticker"].values[0]
         + ")"
     )
 )
 
-asset_row = assets_df[assets_df["id"] == asset_id].iloc[0]
+asset_row = assets_df[assets_df["asset_id"] == selected_asset_id].iloc[0]
 asset_name = asset_row["name"]
 ticker = asset_row["ticker"]
 
@@ -62,7 +62,7 @@ st.markdown(
 # -------------------------------------------------
 metrics_res = supabase.table("daily_metrics") \
     .select("*") \
-    .eq("asset_id", asset_id) \
+    .eq("asset_id", selected_asset_id) \
     .order("date", desc=True) \
     .limit(1) \
     .execute()
@@ -76,7 +76,6 @@ if metrics_res.data:
     col2.metric("News volume", m["news_count"])
     col3.metric("Sentiment volatility", f"{m['sentiment_volatility']:.2f}")
     col4.metric("Signal", m["signal"])
-
 else:
     st.warning("No metrics available.")
 
@@ -87,7 +86,7 @@ st.markdown("### Latest news")
 
 news_res = supabase.table("news") \
     .select("title, url, source, published_at") \
-    .eq("asset_id", asset_id) \
+    .eq("asset_id", selected_asset_id) \
     .order("published_at", desc=True) \
     .execute()
 
