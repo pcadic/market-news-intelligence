@@ -1,101 +1,123 @@
 import streamlit as st
 import pandas as pd
-import os
 from supabase import create_client
+import os
+from dotenv import load_dotenv
 
-# =============================
-# CONFIG
-# =============================
+# -------------------------------------------------
+# Config
+# -------------------------------------------------
 st.set_page_config(
     page_title="Market News Intelligence",
     layout="wide"
 )
 
-SUPABASE_URL = os.environ["SUPABASE_URL"]
-SUPABASE_KEY = os.environ["SUPABASE_SERVICE_ROLE_KEY"]
+load_dotenv()
 
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
+# -------------------------------------------------
+# Load assets
+# -------------------------------------------------
+assets_res = supabase.table("assets").select(
+    "id, name, ticker"
+).order("name").execute()
 
-# =============================
-# LOAD DATA
-# =============================
-assets = pd.DataFrame(
-    supabase.table("assets").select("*").execute().data
-)
+assets_df = pd.DataFrame(assets_res.data)
 
-news = pd.DataFrame(
-    supabase.table("news").select("*").execute().data
-)
+if assets_df.empty:
+    st.error("No assets found.")
+    st.stop()
 
-metrics = pd.DataFrame(
-    supabase.table("daily_metrics").select("*").execute().data
-)
-
-briefs = pd.DataFrame(
-    supabase.table("market_briefs").select("*").execute().data
-)
-
-
-# =============================
-# UI
-# =============================
-st.title("📊 Market News Intelligence")
-
-asset_name = st.selectbox(
+# -------------------------------------------------
+# Asset selector (FIXED)
+# -------------------------------------------------
+asset_id = st.selectbox(
     "Select an asset",
-    assets["name"]
+    options=assets_df["id"].tolist(),
+    format_func=lambda x: (
+        assets_df.loc[assets_df["id"] == x, "name"].values[0]
+        + " ("
+        + assets_df.loc[assets_df["id"] == x, "ticker"].values[0]
+        + ")"
+    )
 )
 
-asset = assets[assets["name"] == asset_name].iloc[0]
-asset_id = asset["asset_id"]
+asset_row = assets_df[assets_df["id"] == asset_id].iloc[0]
+asset_name = asset_row["name"]
+ticker = asset_row["ticker"]
 
-st.subheader(f"{asset_name} ({asset['ticker']})")
+# -------------------------------------------------
+# Header
+# -------------------------------------------------
+st.markdown(
+    f"## {asset_name} <span style='color:#6f6f6f; font-weight:400'>({ticker})</span>",
+    unsafe_allow_html=True
+)
 
+# -------------------------------------------------
+# Daily metrics
+# -------------------------------------------------
+metrics_res = supabase.table("daily_metrics") \
+    .select("*") \
+    .eq("asset_id", asset_id) \
+    .order("date", desc=True) \
+    .limit(1) \
+    .execute()
 
-# =============================
-# METRICS
-# =============================
-asset_metrics = metrics[metrics["asset_id"] == asset_id]
-
-if not asset_metrics.empty:
-    latest = asset_metrics.sort_values("metric_date").iloc[-1]
+if metrics_res.data:
+    m = metrics_res.data[0]
 
     col1, col2, col3, col4 = st.columns(4)
 
-    col1.metric("Average sentiment", f"{latest['avg_sentiment']:.2f}")
-    col2.metric("News volume", int(latest["news_volume"]))
-    col3.metric("Sentiment volatility", f"{latest['sentiment_std']:.2f}")
-    col4.metric("Signal", latest["signal"].replace("_", " ").title())
+    col1.metric("Average sentiment", f"{m['avg_sentiment']:.2f}")
+    col2.metric("News volume", m["news_count"])
+    col3.metric("Sentiment volatility", f"{m['sentiment_volatility']:.2f}")
+    col4.metric("Signal", m["signal"])
+
 else:
-    st.info("No metrics available.")
+    st.warning("No metrics available.")
 
+# -------------------------------------------------
+# News
+# -------------------------------------------------
+st.markdown("### Latest news")
 
-# =============================
-# MARKET BRIEF
-# =============================
-st.markdown("### 🧠 Market Brief")
+news_res = supabase.table("news") \
+    .select("title, url, source, published_at") \
+    .eq("asset_id", asset_id) \
+    .order("published_at", desc=True) \
+    .execute()
 
-asset_brief = briefs[briefs["scope"] == asset["ticker"]]
+news_df = pd.DataFrame(news_res.data)
 
-if not asset_brief.empty:
-    st.write(asset_brief.sort_values("generated_at").iloc[-1]["content"])
+if news_df.empty:
+    st.info("No news available.")
 else:
-    st.info("No market brief available.")
+    news_df["published_at"] = pd.to_datetime(news_df["published_at"]).dt.date
 
+    MAX_VISIBLE = 5
+    visible_news = news_df.head(MAX_VISIBLE)
+    extra_news = news_df.iloc[MAX_VISIBLE:]
 
-# =============================
-# NEWS LIST (CLEAN LINKS)
-# =============================
-st.markdown("### 📰 Recent News")
+    for _, row in visible_news.iterrows():
+        st.markdown(
+            f"- **[{row['title']}]({row['url']})**  \n"
+            f"<span style='color:#6f6f6f; font-size:0.85em'>"
+            f"{row['source']} · {row['published_at']}"
+            f"</span>",
+            unsafe_allow_html=True
+        )
 
-asset_news = news[news["asset_id"] == asset_id] \
-    .sort_values("published_at", ascending=False) \
-    .head(10)
-
-for _, row in asset_news.iterrows():
-    st.markdown(
-        f"- [{row['title']}]({row['url']}) "
-        f"<span style='color:gray;font-size:0.8em'>({row['source']})</span>",
-        unsafe_allow_html=True
-    )
+    if not extra_news.empty:
+        with st.expander(f"Show {len(extra_news)} more articles"):
+            for _, row in extra_news.iterrows():
+                st.markdown(
+                    f"- **[{row['title']}]({row['url']})**  \n"
+                    f"<span style='color:#6f6f6f; font-size:0.85em'>"
+                    f"{row['source']} · {row['published_at']}"
+                    f"</span>",
+                    unsafe_allow_html=True
+                )
