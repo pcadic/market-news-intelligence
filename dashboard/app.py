@@ -1,73 +1,101 @@
 import streamlit as st
+import pandas as pd
+import os
 from supabase import create_client
-from datetime import date
 
 # =============================
-# Supabase client
+# CONFIG
 # =============================
-SUPABASE_URL = st.secrets["SUPABASE_URL"]
-SUPABASE_KEY = st.secrets["SUPABASE_SERVICE_ROLE_KEY"]
+st.set_page_config(
+    page_title="Market News Intelligence",
+    layout="wide"
+)
+
+SUPABASE_URL = os.environ["SUPABASE_URL"]
+SUPABASE_KEY = os.environ["SUPABASE_SERVICE_ROLE_KEY"]
+
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-# =============================
-# Load assets
-# =============================
-assets = supabase.table("assets").select("*").execute().data
-asset_options = [f"{a['ticker']} - {a['name']}" for a in assets]
-selected_asset = st.selectbox("Select an asset", asset_options)
-asset = assets[asset_options.index(selected_asset)]
 
 # =============================
-# Show latest metrics
+# LOAD DATA
 # =============================
-st.header(f"Metrics for {asset['name']} ({asset['ticker']})")
+assets = pd.DataFrame(
+    supabase.table("assets").select("*").execute().data
+)
 
-metrics = supabase.table("daily_metrics") \
-    .select("*") \
-    .eq("asset_id", asset["asset_id"]) \
-    .order("metric_date", desc=True) \
-    .execute().data
+news = pd.DataFrame(
+    supabase.table("news").select("*").execute().data
+)
 
-if metrics:
-    latest = metrics[0]
-    st.metric("Average sentiment", f"{latest['avg_sentiment']:.2f}")
-    st.metric("News volume", latest["news_volume"])
-    st.metric("Sentiment volatility", f"{latest['sentiment_std']:.2f}")
-    st.metric("Signal", latest["signal"])
+metrics = pd.DataFrame(
+    supabase.table("daily_metrics").select("*").execute().data
+)
+
+briefs = pd.DataFrame(
+    supabase.table("market_briefs").select("*").execute().data
+)
+
+
+# =============================
+# UI
+# =============================
+st.title("📊 Market News Intelligence")
+
+asset_name = st.selectbox(
+    "Select an asset",
+    assets["name"]
+)
+
+asset = assets[assets["name"] == asset_name].iloc[0]
+asset_id = asset["asset_id"]
+
+st.subheader(f"{asset_name} ({asset['ticker']})")
+
+
+# =============================
+# METRICS
+# =============================
+asset_metrics = metrics[metrics["asset_id"] == asset_id]
+
+if not asset_metrics.empty:
+    latest = asset_metrics.sort_values("metric_date").iloc[-1]
+
+    col1, col2, col3, col4 = st.columns(4)
+
+    col1.metric("Average sentiment", f"{latest['avg_sentiment']:.2f}")
+    col2.metric("News volume", int(latest["news_volume"]))
+    col3.metric("Sentiment volatility", f"{latest['sentiment_std']:.2f}")
+    col4.metric("Signal", latest["signal"].replace("_", " ").title())
 else:
-    st.info("No metrics yet for this asset.")
+    st.info("No metrics available.")
+
 
 # =============================
-# Show market brief
+# MARKET BRIEF
 # =============================
-st.header("Market Brief")
-briefs = supabase.table("market_briefs") \
-    .select("*") \
-    .eq("scope", asset["ticker"]) \
-    .order("generated_at", desc=True) \
-    .execute().data
+st.markdown("### 🧠 Market Brief")
 
-if briefs:
-    st.write(briefs[0]["content"])
+asset_brief = briefs[briefs["scope"] == asset["ticker"]]
+
+if not asset_brief.empty:
+    st.write(asset_brief.sort_values("generated_at").iloc[-1]["content"])
 else:
-    st.info("No market brief yet.")
+    st.info("No market brief available.")
+
 
 # =============================
-# Show recent news
+# NEWS LIST (CLEAN LINKS)
 # =============================
-st.header("Recent News")
-news = supabase.table("news") \
-    .select("*") \
-    .eq("asset_id", asset["asset_id"]) \
-    .order("published_at", desc=True) \
-    .limit(10) \
-    .execute().data
+st.markdown("### 📰 Recent News")
 
-if news:
-    for n in news:
-        st.markdown(f"**{n['title']}** ({n['source']}, {n['published_at'][:10]})")
-        st.markdown(n["content"])
-        st.markdown(f"[Link]({n['url']})")
-        st.write("---")
-else:
-    st.info("No news yet.")
+asset_news = news[news["asset_id"] == asset_id] \
+    .sort_values("published_at", ascending=False) \
+    .head(10)
+
+for _, row in asset_news.iterrows():
+    st.markdown(
+        f"- [{row['title']}]({row['url']}) "
+        f"<span style='color:gray;font-size:0.8em'>({row['source']})</span>",
+        unsafe_allow_html=True
+    )
